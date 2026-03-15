@@ -6,6 +6,8 @@ import (
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 func TestBuildKiroEndpointConfigs(t *testing.T) {
@@ -419,5 +421,63 @@ func TestEndpointAliases(t *testing.T) {
 	// Verify no unexpected aliases
 	if len(endpointAliases) != len(expectedAliases) {
 		t.Errorf("unexpected number of aliases: got %d, want %d", len(endpointAliases), len(expectedAliases))
+	}
+}
+
+func TestSanitizeKiroIncompatibleFields_StripsUnsupportedFields(t *testing.T) {
+	input := []byte(`{
+		"model": "kiro-claude-opus-4-5",
+		"thinking": {"type": "adaptive"},
+		"output_config": {"effort": "medium"},
+		"context_management": {"mode": "strict"},
+		"tools": [
+			{"name": "web_search", "defer_loading": true, "input_schema": {"type": "object"}},
+			{"type": "function", "function": {"name": "foo", "defer_loading": true}}
+		]
+	}`)
+
+	out := sanitizeKiroIncompatibleFields(input, sdktranslator.FormatClaude)
+
+	if gjson.GetBytes(out, "thinking").Exists() {
+		t.Fatalf("expected thinking to be stripped for adaptive mode, got: %s", out)
+	}
+	if gjson.GetBytes(out, "output_config").Exists() {
+		t.Fatalf("expected output_config to be stripped, got: %s", out)
+	}
+	if gjson.GetBytes(out, "context_management").Exists() {
+		t.Fatalf("expected context_management to be stripped, got: %s", out)
+	}
+	if gjson.GetBytes(out, "tools.0.defer_loading").Exists() {
+		t.Fatalf("expected tools[0].defer_loading to be stripped, got: %s", out)
+	}
+	if gjson.GetBytes(out, "tools.1.function.defer_loading").Exists() {
+		t.Fatalf("expected tools[1].function.defer_loading to be stripped, got: %s", out)
+	}
+}
+
+func TestSanitizeKiroIncompatibleFields_KeepEnabledThinking(t *testing.T) {
+	input := []byte(`{
+		"thinking": {"type": "enabled", "budget_tokens": 2048},
+		"tools": [{"name": "x", "defer_loading": true}]
+	}`)
+
+	out := sanitizeKiroIncompatibleFields(input, sdktranslator.FormatClaude)
+
+	if !gjson.GetBytes(out, "thinking").Exists() {
+		t.Fatalf("expected thinking.type=enabled to be kept, got: %s", out)
+	}
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "enabled" {
+		t.Fatalf("expected thinking.type=enabled, got %q in %s", got, out)
+	}
+	if gjson.GetBytes(out, "tools.0.defer_loading").Exists() {
+		t.Fatalf("expected tools[0].defer_loading to be stripped, got: %s", out)
+	}
+}
+
+func TestSanitizeKiroIncompatibleFields_InvalidJSONPassthrough(t *testing.T) {
+	input := []byte(`not-json`)
+	out := sanitizeKiroIncompatibleFields(input, sdktranslator.FormatClaude)
+	if string(out) != string(input) {
+		t.Fatalf("expected invalid JSON payload to pass through unchanged: got %q want %q", out, input)
 	}
 }

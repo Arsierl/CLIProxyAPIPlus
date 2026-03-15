@@ -32,6 +32,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -463,19 +465,80 @@ type KiroExecutor struct {
 // headers parameter allows checking Anthropic-Beta header for thinking mode detection.
 // Returns the serialized JSON payload and a boolean indicating whether thinking mode was injected.
 func buildKiroPayloadForFormat(body []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, sourceFormat sdktranslator.Format, headers http.Header) ([]byte, bool) {
+	sanitizedBody := sanitizeKiroIncompatibleFields(body, sourceFormat)
+
 	switch sourceFormat.String() {
 	case "openai":
 		log.Debugf("kiro: using OpenAI payload builder for source format: %s", sourceFormat.String())
-		return kiroopenai.BuildKiroPayloadFromOpenAI(body, modelID, profileArn, origin, isAgentic, isChatOnly, headers, nil)
+		return kiroopenai.BuildKiroPayloadFromOpenAI(sanitizedBody, modelID, profileArn, origin, isAgentic, isChatOnly, headers, nil)
 	case "kiro":
 		// Body is already in Kiro format — pass through directly
 		log.Debugf("kiro: body already in Kiro format, passing through directly")
-		return body, false
+		return sanitizedBody, false
 	default:
 		// Default to Claude format
 		log.Debugf("kiro: using Claude payload builder for source format: %s", sourceFormat.String())
-		return kiroclaude.BuildKiroPayload(body, modelID, profileArn, origin, isAgentic, isChatOnly, headers, nil)
+		return kiroclaude.BuildKiroPayload(sanitizedBody, modelID, profileArn, origin, isAgentic, isChatOnly, headers, nil)
 	}
+}
+
+// sanitizeKiroIncompatibleFields removes fields known to be rejected by
+// generateAssistantResponse. We intentionally keep Claude's official thinking
+// payload (`thinking.type == "enabled"`) so reasoning behavior stays compatible.
+func sanitizeKiroIncompatibleFields(body []byte, sourceFormat sdktranslator.Format) []byte {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+
+	cleaned := bytes.Clone(body)
+	removedFields := make([]string, 0, 8)
+
+	deletePath := func(path, label string) {
+		if !gjson.GetBytes(cleaned, path).Exists() {
+			return
+		}
+		updated, err := sjson.DeleteBytes(cleaned, path)
+		if err != nil {
+			log.Debugf("kiro: failed to strip incompatible field %q: %v", path, err)
+			return
+		}
+		cleaned = updated
+		removedFields = append(removedFields, label)
+	}
+
+	deletePath("output_config", "output_config")
+	deletePath("context_management", "context_management")
+
+	if gjson.GetBytes(cleaned, "thinking").Exists() {
+		thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(cleaned, "thinking.type").String()))
+		if thinkingType != "enabled" {
+			deletePath("thinking", "thinking")
+		}
+	}
+
+	tools := gjson.GetBytes(cleaned, "tools")
+	if tools.IsArray() {
+		for idx, tool := range tools.Array() {
+			if tool.Get("defer_loading").Exists() {
+				path := fmt.Sprintf("tools.%d.defer_loading", idx)
+				deletePath(path, path)
+			}
+			if tool.Get("function.defer_loading").Exists() {
+				path := fmt.Sprintf("tools.%d.function.defer_loading", idx)
+				deletePath(path, path)
+			}
+		}
+	}
+
+	if len(removedFields) > 0 {
+		log.Debugf(
+			"kiro: stripped incompatible request fields before forwarding (source=%s): %s",
+			sourceFormat.String(),
+			strings.Join(removedFields, ", "),
+		)
+	}
+
+	return cleaned
 }
 
 // NewKiroExecutor creates a new Kiro executor instance.
