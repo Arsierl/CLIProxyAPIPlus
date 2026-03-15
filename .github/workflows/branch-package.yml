@@ -46,6 +46,7 @@ jobs:
           if [ -z "$BRANCH_SAFE" ]; then
             BRANCH_SAFE="branch"
           fi
+          echo "BRANCH_SAFE=${BRANCH_SAFE}" >> $GITHUB_ENV
           echo "RELEASE_TAG=branch-${BRANCH_SAFE}" >> $GITHUB_ENV
           echo "RELEASE_NAME=Branch Build ${GITHUB_REF_NAME} (${GITHUB_SHA::7})" >> $GITHUB_ENV
           {
@@ -73,7 +74,7 @@ jobs:
       - name: Upload Dist
         uses: actions/upload-artifact@v4
         with:
-          name: CLIProxyAPIPlus-${{ github.ref_name }}-${{ github.sha }}
+          name: CLIProxyAPIPlus-${{ env.BRANCH_SAFE }}-${{ github.sha }}
           path: |
             dist/checksums.txt
             dist/*.tar.gz
