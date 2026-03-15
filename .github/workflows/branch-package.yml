@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   package:
@@ -40,6 +40,24 @@ jobs:
           echo COMMIT=$(git rev-parse --short HEAD) >> $GITHUB_ENV
           echo BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) >> $GITHUB_ENV
 
+      - name: Prepare Branch Release Metadata
+        run: |
+          BRANCH_SAFE=$(echo "${GITHUB_REF_NAME}" | tr '/._' '-' | tr -cd '[:alnum:]-' | sed 's/--*/-/g' | sed 's/^-//;s/-$//' | cut -c1-60)
+          if [ -z "$BRANCH_SAFE" ]; then
+            BRANCH_SAFE="branch"
+          fi
+          echo "RELEASE_TAG=branch-${BRANCH_SAFE}" >> $GITHUB_ENV
+          echo "RELEASE_NAME=Branch Build ${GITHUB_REF_NAME} (${GITHUB_SHA::7})" >> $GITHUB_ENV
+          {
+            echo "RELEASE_BODY<<EOF"
+            echo "Automated prerelease assets for branch testing."
+            echo ""
+            echo "- Branch: \`${GITHUB_REF_NAME}\`"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Built at: \`$(date -u +%Y-%m-%dT%H:%M:%SZ)\`"
+            echo "EOF"
+          } >> $GITHUB_ENV
+
       - name: Build Snapshot Artifacts
         uses: goreleaser/goreleaser-action@v4
         with:
@@ -62,3 +80,17 @@ jobs:
             dist/*.zip
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish / Update Branch Prerelease
+        uses: ncipollo/release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_NAME }}
+          body: ${{ env.RELEASE_BODY }}
+          prerelease: true
+          makeLatest: false
+          commit: ${{ github.sha }}
+          allowUpdates: true
+          removeArtifacts: true
+          artifacts: "dist/checksums.txt,dist/*.tar.gz,dist/*.zip"
